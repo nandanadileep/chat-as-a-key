@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="llm-bridge",
+    title="chat-as-a-key",
     description="Self-hostable LLM proxy over chat UIs",
     version="1.0.0",
     lifespan=lifespan,
@@ -249,7 +249,7 @@ async def dashboard() -> HTMLResponse:
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>llm-bridge dashboard</title>
+  <title>chat-as-a-key dashboard</title>
   <meta http-equiv="refresh" content="15" />
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -305,7 +305,7 @@ async def dashboard() -> HTMLResponse:
   </style>
 </head>
 <body>
-  <h1>llm-bridge</h1>
+  <h1>chat-as-a-key</h1>
   <p class="subtitle">LLM proxy dashboard &mdash; auto-refreshes every 15 seconds</p>
 
   <div class="stat-grid">

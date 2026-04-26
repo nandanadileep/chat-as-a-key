@@ -1,4 +1,4 @@
-# llm-bridge
+# chat-as-a-key
 
 Self-hostable LLM proxy that lets you access Claude.ai, ChatGPT, Gemini, Grok, Perplexity, and Microsoft Copilot programmatically — no separate API key required. It uses Playwright to drive your existing browser sessions and exposes a clean, provider-agnostic REST API.
 
@@ -11,8 +11,8 @@ Self-hostable LLM proxy that lets you access Claude.ai, ChatGPT, Gemini, Grok, P
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/yourname/llm-bridge
-cd llm-bridge
+git clone https://github.com/yourname/chat-as-a-key
+cd chat-as-a-key
 cp .env.example .env
 ```
 
@@ -174,7 +174,7 @@ class LLMBridge(LLM):
 
     @property
     def _llm_type(self) -> str:
-        return "llm-bridge"
+        return "chat-as-a-key"
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         resp = requests.post(
@@ -253,7 +253,7 @@ Supported provider prefixes: `CLAUDE`, `CHATGPT`, `GEMINI`, `GROK`, `PERPLEXITY`
 ## Project structure
 
 ```
-llm-bridge/
+chat-as-a-key/
   providers/
     base.py          # BaseProvider interface + shared data classes
     claude.py

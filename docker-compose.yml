@@ -1,7 +1,7 @@
 version: "3.9"
 
 services:
-  llm-bridge:
+  chat-as-a-key:
     build: .
     ports:
       - "${PORT:-8000}:8000"
