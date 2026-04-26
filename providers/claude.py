@@ -3,6 +3,7 @@ import logging
 from typing import Optional
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
+from playwright_stealth import Stealth
 
 from .base import BaseProvider, ChatResponse
 
@@ -45,11 +46,21 @@ class ClaudeProvider(BaseProvider):
     async def _ensure_browser(self) -> None:
         if self._browser is None:
             self._playwright = await async_playwright().start()
-            launch_args = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
-            self._browser = await self._playwright.chromium.launch(**launch_args)
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+            )
 
         if self._context is None:
-            context_opts = {}
+            context_opts = {
+                "user_agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "viewport": {"width": 1280, "height": 800},
+                "locale": "en-US",
+            }
             if self._storage_state:
                 context_opts["storage_state"] = self._storage_state
             self._context = await self._browser.new_context(**context_opts)
@@ -58,6 +69,7 @@ class ClaudeProvider(BaseProvider):
 
         if self._page is None or self._page.is_closed():
             self._page = await self._context.new_page()
+            await Stealth().apply_stealth_async(self._page)
             self._page.set_default_navigation_timeout(60000)
 
     async def _find_composer(self) -> object:
