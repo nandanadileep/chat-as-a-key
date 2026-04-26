@@ -46,21 +46,37 @@ class ClaudeProvider(BaseProvider):
     async def _ensure_browser(self) -> None:
         if self._browser is None:
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
-            )
+            # Claude.ai uses Cloudflare Bot Management which blocks headless browsers
+            # by TLS fingerprint. Running headed (non-headless) with real Chrome is
+            # the only reliable bypass. On servers, set DISPLAY or use Xvfb.
+            try:
+                self._browser = await self._playwright.chromium.launch(
+                    channel="chrome",
+                    headless=False,
+                    args=["--no-sandbox", "--disable-dev-shm-usage",
+                          "--window-position=-32000,-32000"],
+                )
+                self._using_real_chrome = True
+            except Exception:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=False,
+                    args=["--no-sandbox", "--disable-dev-shm-usage",
+                          "--disable-blink-features=AutomationControlled",
+                          "--window-position=-32000,-32000"],
+                )
+                self._using_real_chrome = False
 
         if self._context is None:
             context_opts = {
-                "user_agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
                 "viewport": {"width": 1280, "height": 800},
                 "locale": "en-US",
             }
+            if not getattr(self, "_using_real_chrome", False):
+                context_opts["user_agent"] = (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
             if self._storage_state:
                 context_opts["storage_state"] = self._storage_state
             self._context = await self._browser.new_context(**context_opts)
@@ -69,7 +85,8 @@ class ClaudeProvider(BaseProvider):
 
         if self._page is None or self._page.is_closed():
             self._page = await self._context.new_page()
-            await Stealth().apply_stealth_async(self._page)
+            if not getattr(self, "_using_real_chrome", False):
+                await Stealth().apply_stealth_async(self._page)
             self._page.set_default_navigation_timeout(60000)
 
     async def _find_composer(self) -> object:
@@ -158,10 +175,14 @@ class ClaudeProvider(BaseProvider):
     async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
-            # Don't navigate again if we're already on claude.ai
-            if "claude.ai" not in self._page.url:
-                await self._page.goto(BASE_URL, wait_until="domcontentloaded")
-                await asyncio.sleep(1)
+            await self._page.goto(BASE_URL, wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+            title = await self._page.title()
+            url = self._page.url
+            # Cloudflare challenge pages have "Just a moment" title
+            if "just a moment" in title.lower() or "challenge" in url:
+                logger.warning("Claude blocked by Cloudflare challenge")
+                return False
             login_visible = await self._page.locator('text="Log in"').count() > 0
             return not login_visible
         except Exception as e:
