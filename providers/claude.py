@@ -39,10 +39,11 @@ class ClaudeProvider(BaseProvider):
 
         if self._page is None or self._page.is_closed():
             self._page = await self._context.new_page()
+            self._page.set_default_navigation_timeout(60000)
 
     async def login(self) -> bool:
         await self._ensure_browser()
-        await self._page.goto(BASE_URL, wait_until="networkidle")
+        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
         return await self.check_session()
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
@@ -53,7 +54,7 @@ class ClaudeProvider(BaseProvider):
         else:
             url = NEW_CHAT_URL
 
-        await self._page.goto(url, wait_until="networkidle")
+        await self._page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(1)
 
         # Type into the composer
@@ -109,7 +110,7 @@ class ClaudeProvider(BaseProvider):
     async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
-            await self._page.goto(BASE_URL, wait_until="networkidle")
+            await self._page.goto(BASE_URL, wait_until="domcontentloaded")
             # Logged-in users see new chat button; logged-out see login
             login_visible = await self._page.locator('text="Log in"').count() > 0
             return not login_visible

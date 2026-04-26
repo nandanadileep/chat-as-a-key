@@ -40,13 +40,13 @@ class CopilotProvider(BaseProvider):
 
     async def login(self) -> bool:
         await self._ensure_browser()
-        await self._page.goto(BASE_URL, wait_until="networkidle")
+        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
         return await self.check_session()
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         await self._ensure_browser()
 
-        await self._page.goto(BASE_URL, wait_until="networkidle")
+        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
         await asyncio.sleep(1.5)
 
         composer = self._page.locator('textarea[placeholder], [contenteditable="true"]').first
@@ -88,7 +88,7 @@ class CopilotProvider(BaseProvider):
     async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
-            await self._page.goto(BASE_URL, wait_until="networkidle")
+            await self._page.goto(BASE_URL, wait_until="domcontentloaded")
             signed_out = await self._page.locator('text="Sign in"').count() > 0
             return not signed_out
         except Exception as e:

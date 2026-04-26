@@ -40,14 +40,14 @@ class GrokProvider(BaseProvider):
 
     async def login(self) -> bool:
         await self._ensure_browser()
-        await self._page.goto(BASE_URL, wait_until="networkidle")
+        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
         return await self.check_session()
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         await self._ensure_browser()
 
         url = f"{BASE_URL}/chat/{conversation_id}" if conversation_id else BASE_URL
-        await self._page.goto(url, wait_until="networkidle")
+        await self._page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(1)
 
         composer = self._page.locator('textarea[placeholder], [contenteditable="true"]').first
@@ -90,7 +90,7 @@ class GrokProvider(BaseProvider):
     async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
-            await self._page.goto(BASE_URL, wait_until="networkidle")
+            await self._page.goto(BASE_URL, wait_until="domcontentloaded")
             logged_out = await self._page.locator('text="Sign in"').count() > 0
             return not logged_out
         except Exception as e:
