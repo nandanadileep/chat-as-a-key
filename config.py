@@ -7,6 +7,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_SAME_SITE_MAP = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",
+    "unspecified": "None",
+}
+
+def _normalize_cookie(c: dict) -> dict:
+    out = {
+        "name": c["name"],
+        "value": c["value"],
+        "domain": c.get("domain", ""),
+        "path": c.get("path", "/"),
+        "secure": bool(c.get("secure", False)),
+        "httpOnly": bool(c.get("httpOnly", False)),
+        "sameSite": _SAME_SITE_MAP.get(str(c.get("sameSite") or "").lower(), "None"),
+    }
+    exp = c.get("expirationDate") or c.get("expires")
+    if exp is not None:
+        out["expires"] = float(exp)
+    return out
+
 
 @dataclass
 class ProviderConfig:
@@ -18,7 +41,8 @@ class ProviderConfig:
     def cookies(self) -> list:
         if self.cookies_json:
             try:
-                return json.loads(self.cookies_json)
+                raw = json.loads(self.cookies_json)
+                return [_normalize_cookie(c) for c in raw]
             except json.JSONDecodeError:
                 return []
         return []
