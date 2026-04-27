@@ -1,7 +1,6 @@
 """
-Run this once per provider to save a full browser session (storage state).
-Opens a real browser window so you can log in manually and pass any bot
-challenges. The saved state is reused by the server for all requests.
+Run this once to log into a provider through a real Chrome window.
+The session is saved to a persistent Chrome profile that the server reuses.
 
 Usage:
     python scripts/capture_session.py claude
@@ -10,7 +9,7 @@ Usage:
 
 After running, set in .env:
     CLAUDE_ENABLED=true
-    CLAUDE_STORAGE_STATE=sessions/claude.json
+    CLAUDE_STORAGE_STATE=sessions/claude_profile   # (already the default)
 """
 
 import asyncio
@@ -20,84 +19,79 @@ import sys
 from playwright.async_api import async_playwright
 
 PROVIDER_URLS = {
-    "claude":      "https://claude.ai",
-    "chatgpt":     "https://chatgpt.com",
-    "gemini":      "https://gemini.google.com",
-    "grok":        "https://grok.com",
-    "perplexity":  "https://www.perplexity.ai",
-    "copilot":     "https://copilot.microsoft.com",
+    "claude":     "https://claude.ai",
+    "chatgpt":    "https://chatgpt.com",
+    "gemini":     "https://gemini.google.com",
+    "grok":       "https://grok.com",
+    "perplexity": "https://www.perplexity.ai",
+    "copilot":    "https://copilot.microsoft.com",
 }
 
-# Cookie that confirms a successful login for each provider
-SESSION_COOKIE = {
-    "claude":      "sessionKey",
-    "chatgpt":     "__Secure-next-auth.session-token",
-    "gemini":      "SID",
-    "grok":        "auth_token",
-    "perplexity":  "__Secure-next-auth.session-token",
-    "copilot":     "MUID",
+LOGGED_IN_CHECK = {
+    "claude":     lambda url, title: "claude.ai" in url and "login" not in url and "just a moment" not in title.lower(),
+    "chatgpt":    lambda url, title: "chatgpt.com" in url and "auth" not in url,
+    "gemini":     lambda url, title: "gemini.google.com" in url and "accounts.google" not in url,
+    "grok":       lambda url, title: "grok.com" in url and "login" not in url,
+    "perplexity": lambda url, title: "perplexity.ai" in url and "login" not in url,
+    "copilot":    lambda url, title: "copilot.microsoft.com" in url and "login" not in url,
 }
 
 
 async def capture(provider: str) -> None:
     if provider not in PROVIDER_URLS:
-        print(f"Unknown provider '{provider}'. Choose from: {', '.join(PROVIDER_URLS)}")
+        print(f"Unknown provider. Choose from: {', '.join(PROVIDER_URLS)}")
         sys.exit(1)
 
     url = PROVIDER_URLS[provider]
-    session_cookie = SESSION_COOKIE.get(provider)
-    out_path = os.path.join("sessions", f"{provider}.json")
-    os.makedirs("sessions", exist_ok=True)
+    profile_dir = os.path.join("sessions", f"{provider}_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+    is_logged_in = LOGGED_IN_CHECK[provider]
 
-    print(f"\nOpening {url} ...")
-    print("Log in completely (solve any CAPTCHA, finish the login flow).")
-    print("The script will detect when you are logged in and save automatically.\n")
+    print(f"\nOpening {url} in Chrome...")
+    print("Log in fully (solve any CAPTCHA, finish the login flow).")
+    print("Chrome will close automatically once you are logged in.\n")
 
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.launch(channel="chrome", headless=False, args=["--no-sandbox"])
+            ctx = await p.chromium.launch_persistent_context(
+                profile_dir,
+                channel="chrome",
+                headless=False,
+                args=["--no-sandbox"],
+                viewport={"width": 1280, "height": 800},
+            )
         except Exception:
-            browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
+            ctx = await p.chromium.launch_persistent_context(
+                profile_dir,
+                headless=False,
+                args=["--no-sandbox"],
+                viewport={"width": 1280, "height": 800},
+            )
 
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
-        )
-        page = await context.new_page()
+        pages = ctx.pages
+        page = pages[0] if pages else await ctx.new_page()
         await page.goto(url)
 
-        print("Waiting for you to log in", end="", flush=True)
-        logged_in = False
-        for _ in range(300):  # wait up to 5 minutes
+        print("Waiting for login", end="", flush=True)
+        for _ in range(300):
             await asyncio.sleep(1)
             print(".", end="", flush=True)
-            cookies = await context.cookies()
-            cookie_names = {c["name"] for c in cookies}
-            if session_cookie and session_cookie in cookie_names:
-                logged_in = True
-                break
-            # Fallback: check URL / title
-            title = await page.title()
-            current_url = page.url
-            if "just a moment" not in title.lower() and "login" not in current_url.lower():
-                if provider == "claude" and "claude.ai" in current_url and "/new" not in current_url and "challenge" not in current_url:
-                    # Extra wait to make sure cookies are all set
-                    await asyncio.sleep(3)
-                    logged_in = True
+            try:
+                current_url = page.url
+                title = await page.title()
+                if is_logged_in(current_url, title):
+                    await asyncio.sleep(2)  # let cookies settle
                     break
+            except Exception:
+                pass
 
-        print()
-        if not logged_in:
-            print("Warning: could not confirm login — saving state anyway.")
+        print(f"\n\nLogged in! Profile saved to: {profile_dir}")
+        await ctx.close()
 
-        await context.storage_state(path=out_path)
-        cookie_count = len(await context.cookies())
-        await browser.close()
-
-    print(f"\nSaved {cookie_count} cookies to {out_path}")
-    print(f"\nAdd to your .env:")
+    print(f"\nAdd to your .env (if not already set):")
     print(f"  {provider.upper()}_ENABLED=true")
-    print(f"  {provider.upper()}_STORAGE_STATE={out_path}")
-    print(f"\nThen restart: python3 server.py")
+    print(f"  {provider.upper()}_STORAGE_STATE={profile_dir}")
+    print(f"\nThen run: python3 server.py")
 
 
 if __name__ == "__main__":

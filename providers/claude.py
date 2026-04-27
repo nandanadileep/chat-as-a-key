@@ -1,9 +1,9 @@
 import asyncio
 import logging
+import os
 from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
-from playwright_stealth import Stealth
+from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
 from .base import BaseProvider, ChatResponse
 
@@ -11,20 +11,18 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://claude.ai"
 NEW_CHAT_URL = f"{BASE_URL}/new"
+DEFAULT_PROFILE_DIR = os.path.join("sessions", "claude_profile")
 
-# Ordered from most to least specific — first one that appears wins
 COMPOSER_SELECTORS = [
     'div.ProseMirror[contenteditable="true"]',
     '[data-testid="chat-input"] [contenteditable="true"]',
     'div[contenteditable="true"]',
 ]
-
 SEND_SELECTORS = [
     'button[aria-label="Send message"]',
     'button[aria-label*="Send"]',
     'button[data-testid="send-button"]',
 ]
-
 RESPONSE_SELECTORS = [
     '[data-testid="assistant-message"]',
     '.font-claude-message',
@@ -36,61 +34,46 @@ class ClaudeProvider(BaseProvider):
     name = "claude"
 
     def __init__(self, cookies: Optional[list] = None, storage_state: Optional[str] = None):
-        self._cookies = cookies or []
-        self._storage_state = storage_state
+        # cookies/storage_state kept for API compat but profile dir is the real mechanism
+        self._profile_dir = storage_state or DEFAULT_PROFILE_DIR
         self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
 
     async def _ensure_browser(self) -> None:
-        if self._browser is None:
-            self._playwright = await async_playwright().start()
-            # Claude.ai uses Cloudflare Bot Management which blocks headless browsers
-            # by TLS fingerprint. Running headed (non-headless) with real Chrome is
-            # the only reliable bypass. On servers, set DISPLAY or use Xvfb.
-            try:
-                self._browser = await self._playwright.chromium.launch(
-                    channel="chrome",
-                    headless=False,
-                    args=["--no-sandbox", "--disable-dev-shm-usage",
-                          "--window-position=-32000,-32000"],
-                )
-                self._using_real_chrome = True
-            except Exception:
-                self._browser = await self._playwright.chromium.launch(
-                    headless=False,
-                    args=["--no-sandbox", "--disable-dev-shm-usage",
-                          "--disable-blink-features=AutomationControlled",
-                          "--window-position=-32000,-32000"],
-                )
-                self._using_real_chrome = False
+        if self._context is not None and not self._page.is_closed():
+            return
 
-        if self._context is None:
-            context_opts = {
-                "viewport": {"width": 1280, "height": 800},
-                "locale": "en-US",
-            }
-            if not getattr(self, "_using_real_chrome", False):
-                context_opts["user_agent"] = (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            if self._storage_state:
-                context_opts["storage_state"] = self._storage_state
-            self._context = await self._browser.new_context(**context_opts)
-            if self._cookies:
-                await self._context.add_cookies(self._cookies)
+        os.makedirs(self._profile_dir, exist_ok=True)
+        self._playwright = await async_playwright().start()
 
-        if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-            if not getattr(self, "_using_real_chrome", False):
-                await Stealth().apply_stealth_async(self._page)
-            self._page.set_default_navigation_timeout(60000)
+        launch_kwargs = dict(
+            user_data_dir=self._profile_dir,
+            headless=False,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-32000,-32000",  # off-screen, invisible
+            ],
+            viewport={"width": 1280, "height": 800},
+            no_viewport=False,
+        )
+
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                channel="chrome", **launch_kwargs
+            )
+        except Exception:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                **launch_kwargs
+            )
+
+        pages = self._context.pages
+        self._page = pages[0] if pages else await self._context.new_page()
+        self._page.set_default_navigation_timeout(60000)
 
     async def _find_composer(self) -> object:
-        """Try each composer selector until one is visible."""
         for sel in COMPOSER_SELECTORS:
             loc = self._page.locator(sel).first
             try:
@@ -98,7 +81,7 @@ class ClaudeProvider(BaseProvider):
                 return loc
             except Exception:
                 continue
-        raise RuntimeError(f"Composer not found after trying: {COMPOSER_SELECTORS}")
+        raise RuntimeError(f"Composer not found. Tried: {COMPOSER_SELECTORS}")
 
     async def _find_send_button(self) -> object:
         for sel in SEND_SELECTORS:
@@ -113,6 +96,7 @@ class ClaudeProvider(BaseProvider):
     async def login(self) -> bool:
         await self._ensure_browser()
         await self._page.goto(BASE_URL, wait_until="domcontentloaded")
+        await asyncio.sleep(3)
         return await self.check_session()
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
@@ -120,8 +104,7 @@ class ClaudeProvider(BaseProvider):
 
         url = f"{BASE_URL}/chat/{conversation_id}" if conversation_id else NEW_CHAT_URL
         await self._page.goto(url, wait_until="domcontentloaded")
-        # Give React time to hydrate
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         composer = await self._find_composer()
         await composer.click()
@@ -145,7 +128,6 @@ class ClaudeProvider(BaseProvider):
         )
 
     async def get_response(self) -> str:
-        # Wait for generation to start (stop button appears)
         try:
             await self._page.wait_for_selector(
                 'button[aria-label*="Stop"], button[data-testid="stop-button"]',
@@ -153,8 +135,6 @@ class ClaudeProvider(BaseProvider):
             )
         except Exception:
             pass
-
-        # Wait for generation to finish (stop button disappears)
         try:
             await self._page.wait_for_selector(
                 'button[aria-label*="Stop"], button[data-testid="stop-button"]',
@@ -165,7 +145,6 @@ class ClaudeProvider(BaseProvider):
             pass
 
         await asyncio.sleep(0.5)
-
         for sel in RESPONSE_SELECTORS:
             messages = await self._page.locator(sel).all()
             if messages:
@@ -175,13 +154,10 @@ class ClaudeProvider(BaseProvider):
     async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
-            await self._page.goto(BASE_URL, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
             title = await self._page.title()
             url = self._page.url
-            # Cloudflare challenge pages have "Just a moment" title
             if "just a moment" in title.lower() or "challenge" in url:
-                logger.warning("Claude blocked by Cloudflare challenge")
+                logger.warning("Claude blocked by Cloudflare — run capture script again")
                 return False
             login_visible = await self._page.locator('text="Log in"').count() > 0
             return not login_visible
@@ -191,8 +167,6 @@ class ClaudeProvider(BaseProvider):
 
     async def reset_session(self) -> bool:
         await self.close()
-        self._context = None
-        self._page = None
         return await self.login()
 
     async def close(self) -> None:
@@ -200,11 +174,8 @@ class ClaudeProvider(BaseProvider):
             await self._page.close()
         if self._context:
             await self._context.close()
-        if self._browser:
-            await self._browser.close()
         if self._playwright:
             await self._playwright.stop()
         self._page = None
         self._context = None
-        self._browser = None
         self._playwright = None
