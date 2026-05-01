@@ -1,11 +1,16 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
+from browser.session_manager import BrowserSessionManager
 
 from .base import BaseProvider, ChatResponse
+
+if TYPE_CHECKING:
+    from core.orchestrator import ClaudeOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -13,154 +18,144 @@ BASE_URL = "https://claude.ai"
 NEW_CHAT_URL = f"{BASE_URL}/new"
 DEFAULT_PROFILE_DIR = os.path.join("sessions", "claude_profile")
 
-COMPOSER_SELECTORS = [
+# Positive signals (logged in) — same family as orchestrator composer selectors
+_LOGGED_IN_SELECTORS = [
     'div.ProseMirror[contenteditable="true"]',
     '[data-testid="chat-input"] [contenteditable="true"]',
-    'div[contenteditable="true"]',
+    'textarea[placeholder*="Message"]',
+    '[data-testid="chat-input"]',
+    '[data-testid="chat-input"] textarea',
+    "div[contenteditable='true'][role='textbox']",
 ]
-SEND_SELECTORS = [
-    'button[aria-label="Send message"]',
-    'button[aria-label*="Send"]',
-    'button[data-testid="send-button"]',
-]
-RESPONSE_SELECTORS = [
-    '[data-testid="assistant-message"]',
-    '.font-claude-message',
-    '[class*="AssistantMessage"]',
-]
+
+# Max time to wait for /new (or composer) after navigation — SPAs often need >10s.
+_SESSION_WAIT_SEC = 35
 
 
 class ClaudeProvider(BaseProvider):
     name = "claude"
 
     def __init__(self, cookies: Optional[list] = None, storage_state: Optional[str] = None):
-        # cookies/storage_state kept for API compat but profile dir is the real mechanism
-        self._profile_dir = storage_state or DEFAULT_PROFILE_DIR
-        self._playwright: Optional[Playwright] = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
+        self._cookies = cookies or []
+        self._session = BrowserSessionManager(
+            storage_state_or_profile=storage_state,
+            cookies=cookies,
+            default_profile_dir=DEFAULT_PROFILE_DIR,
+            headless=False,
+        )
+        self._orch: Optional["ClaudeOrchestrator"] = None
+
+    def _get_orch(self) -> "ClaudeOrchestrator":
+        if self._orch is None:
+            from core.orchestrator import ClaudeOrchestrator
+
+            self._orch = ClaudeOrchestrator(self._session)
+        return self._orch
 
     async def _ensure_browser(self) -> None:
-        if self._context is not None and not self._page.is_closed():
-            return
-
-        os.makedirs(self._profile_dir, exist_ok=True)
-        self._playwright = await async_playwright().start()
-
-        launch_kwargs = dict(
-            user_data_dir=self._profile_dir,
-            headless=False,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--window-position=-32000,-32000",  # off-screen, invisible
-            ],
-            viewport={"width": 1280, "height": 800},
-            no_viewport=False,
-        )
-
-        try:
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                channel="chrome", **launch_kwargs
-            )
-        except Exception:
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                **launch_kwargs
-            )
-
-        pages = self._context.pages
-        self._page = pages[0] if pages else await self._context.new_page()
-        self._page.set_default_navigation_timeout(60000)
-
-    async def _find_composer(self) -> object:
-        for sel in COMPOSER_SELECTORS:
-            loc = self._page.locator(sel).first
-            try:
-                await loc.wait_for(state="visible", timeout=5000)
-                return loc
-            except Exception:
-                continue
-        raise RuntimeError(f"Composer not found. Tried: {COMPOSER_SELECTORS}")
-
-    async def _find_send_button(self) -> object:
-        for sel in SEND_SELECTORS:
-            loc = self._page.locator(sel).first
-            try:
-                await loc.wait_for(state="visible", timeout=3000)
-                return loc
-            except Exception:
-                continue
-        raise RuntimeError("Send button not found")
+        await self._session.ensure_browser()
 
     async def login(self) -> bool:
-        await self._ensure_browser()
-        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-        return await self.check_session()
+        await self._session.ensure_browser()
+        page = self._session.page
+        if page is None:
+            return False
+        await page.goto(NEW_CHAT_URL, wait_until="domcontentloaded")
+        ok = await self._wait_for_claude_ready(page, _SESSION_WAIT_SEC)
+        if ok:
+            logger.info("Claude login probe succeeded")
+        else:
+            logger.warning("Claude login probe failed (see prior session logs)")
+        return ok
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
-        await self._ensure_browser()
-
-        url = f"{BASE_URL}/chat/{conversation_id}" if conversation_id else NEW_CHAT_URL
-        await self._page.goto(url, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-
-        composer = await self._find_composer()
-        await composer.click()
-        await composer.fill("")
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
-
-        send_btn = await self._find_send_button()
-        await send_btn.click()
-
-        response_text = await self.get_response()
-
-        current_url = self._page.url
-        conv_id = current_url.split("/chat/")[-1].split("?")[0] if "/chat/" in current_url else None
-
-        return ChatResponse(
-            provider=self.name,
-            message=response_text,
-            conversation_id=conv_id,
-            model="claude",
+        return await self._get_orch().send_message(
+            message,
+            conversation_id,
+            check_session_cb=self.check_session,
+            reset_session_cb=self.reset_session,
         )
 
     async def get_response(self) -> str:
-        try:
-            await self._page.wait_for_selector(
-                'button[aria-label*="Stop"], button[data-testid="stop-button"]',
-                timeout=20000,
-            )
-        except Exception:
-            pass
-        try:
-            await self._page.wait_for_selector(
-                'button[aria-label*="Stop"], button[data-testid="stop-button"]',
-                state="hidden",
-                timeout=120000,
-            )
-        except Exception:
-            pass
-
-        await asyncio.sleep(0.5)
-        for sel in RESPONSE_SELECTORS:
-            messages = await self._page.locator(sel).all()
+        await self._ensure_browser()
+        page = self._session.page
+        if page is None:
+            return ""
+        for sel in (
+            '[data-testid="assistant-message"]',
+            ".font-claude-message",
+            '[class*="AssistantMessage"]',
+        ):
+            messages = await page.locator(sel).all()
             if messages:
                 return (await messages[-1].inner_text()).strip()
         return ""
 
+    async def _snapshot_cloudflare_or_challenge(self, page) -> bool:
+        title = (await page.title()).lower()
+        url = page.url.lower()
+        return (
+            "just a moment" in title
+            or "challenge" in url
+            or "cf-browser-verification" in url
+            or "turnstile" in title
+        )
+
+    async def _snapshot_explicitly_logged_out(self, page) -> bool:
+        url = page.url.lower()
+        path = urlparse(page.url).path.lower()
+        if path.startswith("/login"):
+            return True
+        base = url.split("?", 1)[0]
+        if "claude.ai" in url and "/login" in base:
+            return True
+        return False
+
+    async def _snapshot_logged_in(self, page) -> bool:
+        if await self._snapshot_cloudflare_or_challenge(page):
+            return False
+        path = urlparse(page.url).path.lower()
+        if path == "/new" or path.startswith("/chat/"):
+            return True
+        for sel in _LOGGED_IN_SELECTORS:
+            loc = page.locator(sel).first
+            try:
+                if await loc.is_visible(timeout=800):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_for_claude_ready(self, page, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                if await self._snapshot_cloudflare_or_challenge(page):
+                    logger.warning("Claude session: Cloudflare/challenge page — complete in a real browser, then retry")
+                    return False
+                if await self._snapshot_explicitly_logged_out(page):
+                    return False
+                if await self._snapshot_logged_in(page):
+                    return True
+            except Exception as e:
+                logger.debug("session probe tick: %s", e)
+            await asyncio.sleep(1)
+        try:
+            logger.warning(
+                "Claude session probe timed out after %ss — last url=%s path=%s",
+                int(timeout_sec),
+                page.url[:120],
+                urlparse(page.url).path,
+            )
+        except Exception:
+            pass
+        return False
+
     async def check_session(self) -> bool:
         try:
-            await self._ensure_browser()
-            title = await self._page.title()
-            url = self._page.url
-            if "just a moment" in title.lower() or "challenge" in url:
-                logger.warning("Claude blocked by Cloudflare — run capture script again")
-                return False
-            login_visible = await self._page.locator('text="Log in"').count() > 0
-            return not login_visible
+            page = await self._session.ensure_browser()
+            await page.goto(NEW_CHAT_URL, wait_until="domcontentloaded")
+            return await self._wait_for_claude_ready(page, _SESSION_WAIT_SEC)
         except Exception as e:
             logger.warning("Claude session check failed: %s", e)
             return False
@@ -170,12 +165,4 @@ class ClaudeProvider(BaseProvider):
         return await self.login()
 
     async def close(self) -> None:
-        if self._page and not self._page.is_closed():
-            await self._page.close()
-        if self._context:
-            await self._context.close()
-        if self._playwright:
-            await self._playwright.stop()
-        self._page = None
-        self._context = None
-        self._playwright = None
+        await self._session.close()
