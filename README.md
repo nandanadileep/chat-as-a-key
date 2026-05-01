@@ -242,9 +242,10 @@ print(response.json()["message"])
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8000` | Listen port |
 | `LOG_LEVEL` | `info` | Uvicorn log level |
+| `ENABLE_TRACING` | `false` | When `true`, adds Chrome `--remote-debugging-port` for **all** Playwright providers; on **empty reply or exception**, one traced retry (CDP + screenshots) under `.o11y/{run_id}/`. Successful requests unchanged. |
 | `{PROVIDER}_ENABLED` | `false` | Enable a provider |
 | `{PROVIDER}_COOKIES` | — | JSON cookie array |
-| `{PROVIDER}_STORAGE_STATE` | — | Path to Playwright state file |
+| `{PROVIDER}_STORAGE_STATE` | — | Path: **directory** = persistent Chrome profile; **`.json`** = Playwright `storage_state` (Claude auto-detects). **Do not** open the same profile folder in manual Chrome while the server runs (Chrome `SingletonLock`). |
 
 Supported provider prefixes: `CLAUDE`, `CHATGPT`, `GEMINI`, `GROK`, `PERPLEXITY`, `COPILOT`.
 
@@ -254,16 +255,27 @@ Supported provider prefixes: `CLAUDE`, `CHATGPT`, `GEMINI`, `GROK`, `PERPLEXITY`
 
 ```
 chat-as-a-key/
+  browser/
+    session_manager.py   # Persistent profile vs storage_state JSON
+    network_interceptor.py
+    tracing_launch.py    # --remote-debugging-port when ENABLE_TRACING
+    cdp_observer.py      # Read-only CDP WebSocket observer (failure retry)
+    tracer.py            # Playwright screenshot/DOM loop (failure retry)
+  core/
+    orchestrator.py      # Claude send + retries + failure CDP trace
+    traced_send.py       # Shared failure-triggered trace (ChatGPT, Gemini, …)
+  parsers/
+    claude_parser.py     # network-first, DOM fallback structured parse
   providers/
-    base.py          # BaseProvider interface + shared data classes
+    base.py
     claude.py
     chatgpt.py
     gemini.py
     grok.py
     perplexity.py
     copilot.py
-  server.py          # FastAPI app, routes, dashboard
-  config.py          # .env loading
+  server.py
+  config.py
   docker-compose.yml
   Dockerfile
   requirements.txt
@@ -277,6 +289,7 @@ chat-as-a-key/
 1. Create `providers/yourprovider.py` implementing `BaseProvider`.
 2. Add it to `PROVIDER_MAP` in `providers/__init__.py`.
 3. Add the `YOURPROVIDER_ENABLED` / `YOURPROVIDER_COOKIES` vars to `.env.example`.
+4. For Playwright providers, use `chromium_tracing_args()` on launch and wrap `send_message` with `core.traced_send.send_with_optional_failure_trace` (see `chatgpt.py`) so `ENABLE_TRACING` failure retries work.
 
 ---
 
