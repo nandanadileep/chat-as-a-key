@@ -1,6 +1,5 @@
 """
 Run this once to log into a provider through a real Chrome window.
-The session is saved to a persistent Chrome profile that the server reuses.
 
 Usage:
     python scripts/capture_session.py claude
@@ -8,8 +7,9 @@ Usage:
     ...
 
 After running, set in .env:
-    CLAUDE_ENABLED=true
-    CLAUDE_STORAGE_STATE=sessions/claude_profile   # (already the default)
+  - Claude: persistent profile dir (server uses Chrome + folder).
+  - ChatGPT, Gemini, Grok, Perplexity, Copilot: Playwright ``storage_state`` JSON
+    (exported here) — point ``*_STORAGE_STATE`` at ``sessions/<provider>.json``.
 """
 
 import asyncio
@@ -73,6 +73,7 @@ async def capture(provider: str) -> None:
         await page.goto(url)
 
         print("Waiting for login", end="", flush=True)
+        logged_ok = False
         for _ in range(300):
             await asyncio.sleep(1)
             print(".", end="", flush=True)
@@ -81,17 +82,32 @@ async def capture(provider: str) -> None:
                 title = await page.title()
                 if is_logged_in(current_url, title):
                     await asyncio.sleep(2)  # let cookies settle
+                    logged_ok = True
                     break
             except Exception:
                 pass
 
-        print(f"\n\nLogged in! Profile saved to: {profile_dir}")
+        if not logged_ok:
+            print("\n\nTimed out waiting for login (5 min). Close and re-run when you can finish sign-in.")
+            await ctx.close()
+            sys.exit(1)
+
+        print(f"\n\nLogged in! Chrome profile saved to: {profile_dir}")
+
+        os.makedirs("sessions", exist_ok=True)
+        json_path = os.path.join("sessions", f"{provider}.json")
+        await ctx.storage_state(path=json_path)
+        print(f"Playwright storage_state saved to: {json_path}")
+
         await ctx.close()
 
     print(f"\nAdd to your .env (if not already set):")
     print(f"  {provider.upper()}_ENABLED=true")
-    print(f"  {provider.upper()}_STORAGE_STATE={profile_dir}")
-    print(f"\nThen run: python3 server.py")
+    if provider == "claude":
+        print(f"  {provider.upper()}_STORAGE_STATE={profile_dir}")
+    else:
+        print(f"  {provider.upper()}_STORAGE_STATE={json_path}")
+    print(f"\nThen restart: python3 server.py")
 
 
 if __name__ == "__main__":

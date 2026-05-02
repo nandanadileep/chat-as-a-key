@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 from browser.session_manager import BrowserSessionManager
+from config import config
 
 from .base import BaseProvider, ChatResponse
 
@@ -35,13 +36,13 @@ _SESSION_WAIT_SEC = 35
 class ClaudeProvider(BaseProvider):
     name = "claude"
 
-    def __init__(self, cookies: Optional[list] = None, storage_state: Optional[str] = None):
+    def __init__(self, cookies: Optional[list] = None, storage_state: Optional[str] = None, **kwargs: object) -> None:
         self._cookies = cookies or []
         self._session = BrowserSessionManager(
             storage_state_or_profile=storage_state,
             cookies=cookies,
             default_profile_dir=DEFAULT_PROFILE_DIR,
-            headless=False,
+            headless=config.claude_headless,
         )
         self._orch: Optional["ClaudeOrchestrator"] = None
 

@@ -1,50 +1,66 @@
 # chat-as-a-key
 
-Self-hostable LLM proxy that lets you access Claude.ai, ChatGPT, Gemini, Grok, Perplexity, and Microsoft Copilot programmatically — no separate API key required. It uses Playwright to drive your existing browser sessions and exposes a clean, provider-agnostic REST API.
+Self-hostable proxy that drives **Claude.ai, ChatGPT, Gemini, Grok, Perplexity, and Microsoft Copilot** in a real browser (Playwright), reuses **your** sessions, and exposes a small **REST** API. It is **not** those vendors’ official APIs.
 
-> **Disclaimer:** This project automates web UIs in ways that may violate the Terms of Service of Claude.ai, ChatGPT, Google Gemini, Grok, Perplexity, and Microsoft Copilot. Use it only with accounts you own and entirely at your own risk. The authors are not responsible for account suspensions or any other consequences.
+> **Legal / terms:** read **[DISCLAIMER.md](DISCLAIMER.md)** in full. This project is not affiliated with Anthropic, OpenAI, Google, xAI, Perplexity, or Microsoft. Use is at your own risk; accounts can be limited or closed under provider rules.
 
 ---
 
-## Quick start
+## Smoke test results
 
-### 1. Clone and configure
+Smoke: `GET /v1/health` then `POST /v1/chat` with  
+`{"message": "Reply with exactly one word: pong"}`  
+for **each provider enabled in `.env`**. Below is a **real run** committed to the README (refresh when you change sessions or code).
+
+| Provider | Result | Notes |
+| --- | --- | --- |
+| `claude` | **OK** | Response contained `pong`. |
+| `chatgpt` | **FAIL** | Composer never became visible — often a **bot / human gate** (see screenshot) or degraded headless UI, not only selectors. |
+| `gemini` | **OK** | Response contained `pong`. |
+| `grok` | **OK** | HTTP 200; **empty** assistant text in this run (still counted OK for connectivity). |
+| `perplexity` | **FAIL** | Composer not visible within timeout. |
+| `copilot` | **FAIL** | Composer not visible within timeout. |
+
+**Recorded:** 2026-05-02 · **Environment:** dev machine, server at `http://127.0.0.1:8000`, 360s timeout per provider.
+
+**Regenerate this table:** with the server running and `.env` loaded, from repo root:
 
 ```bash
-git clone https://github.com/yourname/chat-as-a-key
+source .venv/bin/activate
+python scripts/smoke_test_providers.py --markdown
+```
+
+Copy the printed Markdown table and replace the block above. **`--catalog`** lists every supported provider vs your `*_ENABLED` flags (no HTTP).
+
+---
+
+### When “composer not visible” is a trust boundary, not a typo
+
+Headless automation sometimes never reaches the chat shell. Example: **Cloudflare “Verify you are human”** on the way to ChatGPT — there is no message box yet, so every composer wait times out.
+
+![Cloudflare human verification interstitial on path to ChatGPT](docs/assets/cloudflare-chatgpt-human-verify.png)
+
+For **Grok vs Groq**, headless vs headed tradeoffs, and capture commands, see **[docs/PROVIDER_BROWSER_MATRIX.md](docs/PROVIDER_BROWSER_MATRIX.md)** (dated).
+
+---
+
+## Setup
+
+**Step-by-step:** **[SETUP.md](SETUP.md)** (sessions, `.env`, Docker vs native, Claude profile / `SingletonLock`, troubleshooting).
+
+```bash
+git clone https://github.com/YOUR_GITHUB_USER/chat-as-a-key.git
 cd chat-as-a-key
 cp .env.example .env
+pip install -r requirements.txt && playwright install chromium
+python scripts/capture_session.py claude   # repeat per provider; see SETUP.md
+# Edit .env: enable providers and set *_STORAGE_STATE / cookies
+docker compose up --build    # or: python server.py
 ```
 
-Edit `.env` and enable the providers you want:
-
-```dotenv
-CLAUDE_ENABLED=true
-CLAUDE_COOKIES=[{"name":"sessionKey","value":"sk-ant-...","domain":"claude.ai","path":"/"}]
-```
-
-See [Exporting cookies](#exporting-cookies) below.
-
-### 2. Run with Docker (recommended)
-
-```bash
-docker compose up --build
-```
-
-The API is now available at `http://localhost:8000`.
-
-### 3. Run without Docker
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-cp .env.example .env   # fill in values
-python server.py
-```
+**URLs:** API `http://localhost:8000` · Dashboard `/dashboard` · OpenAPI `/docs`
 
 ---
-
-## API
 
 ### POST /v1/chat
 
@@ -117,118 +133,18 @@ http://localhost:8000/dashboard
 
 ---
 
-## Exporting cookies
+## Sessions and cookies
 
-The easiest way to get valid session cookies is to use a browser extension like **Cookie-Editor** or **EditThisCookie**, log into the provider, and export the cookies as JSON.
+Use **`scripts/capture_session.py`** and `*_STORAGE_STATE` / `*_COOKIES` in `.env`. Details: **[SETUP.md](SETUP.md)**.
 
-Paste the JSON array directly into your `.env`:
-
-```dotenv
-CLAUDE_COOKIES=[{"name":"sessionKey","value":"YOUR_VALUE","domain":"claude.ai","path":"/","secure":true,"httpOnly":true}]
-```
-
-Alternatively, you can use a Playwright storage state file (includes cookies + localStorage), which is more robust for providers that use localStorage:
-
-```bash
-# Generate a storage state file for Claude
-python -c "
-import asyncio
-from playwright.async_api import async_playwright
-
-async def capture():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto('https://claude.ai')
-        input('Log in manually, then press Enter...')
-        await context.storage_state(path='sessions/claude.json')
-        await browser.close()
-        print('Saved to sessions/claude.json')
-
-asyncio.run(capture())
-"
-```
-
-Then in `.env`:
-
-```dotenv
-CLAUDE_STORAGE_STATE=sessions/claude.json
-```
-
----
-
-## Integrations
-
-### LangChain
-
-```python
-from langchain_community.llms.base import LLM
-from typing import Optional, List
-import requests
-
-class LLMBridge(LLM):
-    provider: str = "claude"
-    base_url: str = "http://localhost:8000"
-    conversation_id: Optional[str] = None
-
-    @property
-    def _llm_type(self) -> str:
-        return "chat-as-a-key"
-
-    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
-        resp = requests.post(
-            f"{self.base_url}/v1/chat",
-            json={"provider": self.provider, "message": prompt, "conversation_id": self.conversation_id},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self.conversation_id = data.get("conversation_id")
-        return data["message"]
-
-llm = LLMBridge(provider="claude")
-print(llm.invoke("What is the capital of France?"))
-```
-
-### LlamaIndex
-
-```python
-from llama_index.llms.custom import CustomLLM
-from llama_index.core.llms import CompletionResponse
-import requests
-
-class LLMBridgeLLM(CustomLLM):
-    provider: str = "claude"
-    base_url: str = "http://localhost:8000"
-
-    @property
-    def metadata(self):
-        from llama_index.core.llms import LLMMetadata
-        return LLMMetadata(model_name=self.provider)
-
-    def complete(self, prompt: str, **kwargs) -> CompletionResponse:
-        resp = requests.post(
-            f"{self.base_url}/v1/chat",
-            json={"provider": self.provider, "message": prompt},
-        )
-        resp.raise_for_status()
-        return CompletionResponse(text=resp.json()["message"])
-
-    def stream_complete(self, prompt: str, **kwargs):
-        raise NotImplementedError
-
-llm = LLMBridgeLLM(provider="gemini")
-print(llm.complete("Hello, world!").text)
-```
-
-### Any HTTP client
+### Example: `httpx`
 
 ```python
 import httpx
 
 response = httpx.post(
     "http://localhost:8000/v1/chat",
-    json={"provider": "chatgpt", "message": "Write a haiku about Docker."},
+    json={"provider": "claude", "message": "Write a haiku about Docker."},
 )
 print(response.json()["message"])
 ```
@@ -243,6 +159,8 @@ print(response.json()["message"])
 | `PORT` | `8000` | Listen port |
 | `LOG_LEVEL` | `info` | Uvicorn log level |
 | `ENABLE_TRACING` | `false` | When `true`, adds Chrome `--remote-debugging-port` for **all** Playwright providers; on **empty reply or exception**, one traced retry (CDP + screenshots) under `.o11y/{run_id}/`. Successful requests unchanged. |
+| `PLAYWRIGHT_HEADLESS` | `true` | Gemini, Grok, Copilot: bundled Chromium headless (set `false` for headed local debugging). |
+| `CLAUDE_HEADLESS` | `false` | When `true`, Claude uses headless Chrome (containers); default `false` is visible Chrome. |
 | `{PROVIDER}_ENABLED` | `false` | Enable a provider |
 | `{PROVIDER}_COOKIES` | — | JSON cookie array |
 | `{PROVIDER}_STORAGE_STATE` | — | Path: **directory** = persistent Chrome profile; **`.json`** = Playwright `storage_state` (Claude auto-detects). **Do not** open the same profile folder in manual Chrome while the server runs (Chrome `SingletonLock`). |
@@ -256,30 +174,42 @@ Supported provider prefixes: `CLAUDE`, `CHATGPT`, `GEMINI`, `GROK`, `PERPLEXITY`
 ```
 chat-as-a-key/
   browser/
-    session_manager.py   # Persistent profile vs storage_state JSON
+    session_manager.py
+    headless_chrome.py
+    playwright_cleanup.py
     network_interceptor.py
-    tracing_launch.py    # --remote-debugging-port when ENABLE_TRACING
-    cdp_observer.py      # Read-only CDP WebSocket observer (failure retry)
-    tracer.py            # Playwright screenshot/DOM loop (failure retry)
+    tracing_launch.py
+    cdp_observer.py
+    tracer.py
   core/
-    orchestrator.py      # Claude send + retries + failure CDP trace
-    traced_send.py       # Shared failure-triggered trace (ChatGPT, Gemini, …)
+    orchestrator.py
+    traced_send.py
   parsers/
-    claude_parser.py     # network-first, DOM fallback structured parse
+    claude_parser.py
   providers/
     base.py
+    playwright_bases.py
     claude.py
     chatgpt.py
     gemini.py
     grok.py
     perplexity.py
     copilot.py
+  scripts/
+    capture_session.py
+    smoke_test_providers.py
   server.py
   config.py
   docker-compose.yml
   Dockerfile
   requirements.txt
   .env.example
+  SETUP.md
+  DISCLAIMER.md
+  docs/
+    PROVIDER_BROWSER_MATRIX.md
+    assets/
+      cloudflare-chatgpt-human-verify.png
 ```
 
 ---
@@ -295,4 +225,4 @@ chat-as-a-key/
 
 ## License
 
-MIT
+MIT. Use of this software is subject to [DISCLAIMER.md](DISCLAIMER.md).

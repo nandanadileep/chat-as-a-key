@@ -1,51 +1,71 @@
 import asyncio
 import logging
+import re
+import time
 from typing import Optional
+from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
+from playwright.async_api import Locator, Page
 
-from browser.tracing_launch import chromium_tracing_args
 from core.traced_send import send_with_optional_failure_trace
 
-from .base import BaseProvider, ChatResponse
+from .base import ChatResponse
+from .playwright_bases import StealthChromePlaywrightProvider
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.perplexity.ai"
 
 
-class PerplexityProvider(BaseProvider):
+def _ppl_ms_budget(end: float, cap: int = 6000) -> int:
+    ms = int((end - time.monotonic()) * 1000)
+    return max(400, min(cap, ms))
+
+
+async def _resolve_perplexity_composer(page: Page, timeout_ms: int = 120_000) -> Locator:
+    end = time.monotonic() + timeout_ms / 1000.0
+    last_err: Optional[Exception] = None
+    while time.monotonic() < end:
+        candidates: list[Locator] = [
+            page.get_by_placeholder(re.compile(r"ask|what|how|search|type|query|message|prompt", re.I)),
+            page.locator("main textarea"),
+            page.locator('div[contenteditable="true"][role="textbox"]'),
+            page.locator('textarea[rows]'),
+            page.locator("textarea"),
+        ]
+        for loc in candidates:
+            if _ppl_ms_budget(end, 6000) < 800:
+                break
+            c = loc.first
+            try:
+                await c.wait_for(state="visible", timeout=_ppl_ms_budget(end, 6000))
+                return c
+            except Exception as e:
+                last_err = e
+        await asyncio.sleep(0.35)
+    raise TimeoutError(f"Perplexity composer not visible: {last_err}")
+
+
+async def _perplexity_explicitly_logged_out(page: Page) -> bool:
+    u = page.url.lower()
+    path = urlparse(u).path.lower()
+    netloc = urlparse(u).netloc.lower()
+    if netloc in ("accounts.google.com", "accounts.youtube.com"):
+        return True
+    if "/login" in path or "/signin" in path or "/sign-in" in path:
+        return True
+    return False
+
+
+def _perplexity_on_app_surface(url: str) -> bool:
+    n = urlparse(url).netloc.lower()
+    return "perplexity.ai" in n or n.endswith(".perplexity.ai") or "pplx.ai" in n
+
+
+class PerplexityProvider(StealthChromePlaywrightProvider):
     name = "perplexity"
-
-    def __init__(self, cookies: Optional[list] = None, storage_state: Optional[str] = None):
-        self._cookies = cookies or []
-        self._storage_state = storage_state
-        self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
-
-    async def _ensure_browser(self) -> None:
-        if self._browser is None:
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", *chromium_tracing_args()],
-            )
-        if self._context is None:
-            context_opts = {}
-            if self._storage_state:
-                context_opts["storage_state"] = self._storage_state
-            self._context = await self._browser.new_context(**context_opts)
-            if self._cookies:
-                await self._context.add_cookies(self._cookies)
-        if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-
-    async def login(self) -> bool:
-        await self._ensure_browser()
-        await self._page.goto(BASE_URL, wait_until="domcontentloaded")
-        return await self.check_session()
+    BASE_URL = BASE_URL
+    HEADED_ENV_VAR = "PERPLEXITY_HEADED"
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         await self._ensure_browser()
@@ -54,10 +74,22 @@ class PerplexityProvider(BaseProvider):
         async def _attempt() -> ChatResponse:
             url = f"{BASE_URL}/search/{conversation_id}" if conversation_id else BASE_URL
             await page.goto(url, wait_until="domcontentloaded")
-            await asyncio.sleep(1)
+            try:
+                await page.wait_for_load_state("load", timeout=30_000)
+            except Exception:
+                pass
+            await asyncio.sleep(3.0)
 
-            composer = page.locator('textarea[placeholder*="Ask"]').first
-            await composer.wait_for(state="visible", timeout=15000)
+            for pattern in (r"Accept all", r"^Accept$", r"Continue", r"Dismiss", r"Not now"):
+                try:
+                    b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                    if await b.is_visible(timeout=600):
+                        await b.click(timeout=2000)
+                        await asyncio.sleep(0.4)
+                except Exception:
+                    pass
+
+            composer = await _resolve_perplexity_composer(page)
             await composer.click()
             await composer.fill(message)
             await asyncio.sleep(0.3)
@@ -99,34 +131,27 @@ class PerplexityProvider(BaseProvider):
             return (await messages[-1].inner_text()).strip()
         return ""
 
-    async def get_response(self) -> str:
-        await self._ensure_browser()
-        return await self._get_response_on_page(self._page)
+    async def check_session(self) -> bool:
         try:
             await self._ensure_browser()
             await self._page.goto(BASE_URL, wait_until="domcontentloaded")
-            signed_out = await self._page.locator('text="Sign up"').count() > 0
-            return not signed_out
+            await asyncio.sleep(2.0)
+            if await _perplexity_explicitly_logged_out(self._page):
+                return False
+            try:
+                await _resolve_perplexity_composer(self._page, timeout_ms=15_000)
+                return True
+            except Exception:
+                pass
+            if await _perplexity_explicitly_logged_out(self._page):
+                return False
+            if _perplexity_on_app_surface(self._page.url):
+                logger.info(
+                    "Perplexity: composer not visible within probe window; treating session as alive "
+                    "(send_message will still wait full timeout)"
+                )
+                return True
+            return False
         except Exception as e:
             logger.warning("Perplexity session check failed: %s", e)
             return False
-
-    async def reset_session(self) -> bool:
-        await self.close()
-        self._context = None
-        self._page = None
-        return await self.login()
-
-    async def close(self) -> None:
-        if self._page and not self._page.is_closed():
-            await self._page.close()
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        self._page = None
-        self._context = None
-        self._browser = None
-        self._playwright = None

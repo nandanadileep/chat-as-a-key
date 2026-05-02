@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Active provider instances
 _providers: dict[str, BaseProvider] = {}
+# Serialize /v1/chat (and session reuse) per provider — one Page per instance.
+_provider_chat_locks: dict[str, asyncio.Lock] = {}
 # Per-provider request counters  {provider: count}
 _request_counts: dict[str, int] = defaultdict(int)
 # Per-provider last-error cache
@@ -38,6 +40,14 @@ app = FastAPI(
 )
 
 
+def _chat_lock(name: str) -> asyncio.Lock:
+    lk = _provider_chat_locks.get(name)
+    if lk is None:
+        lk = asyncio.Lock()
+        _provider_chat_locks[name] = lk
+    return lk
+
+
 async def _init_providers() -> None:
     for name, pcfg in config.providers.items():
         if not pcfg.enabled:
@@ -46,7 +56,14 @@ async def _init_providers() -> None:
         if cls is None:
             logger.warning("Unknown provider: %s", name)
             continue
-        instance = cls(cookies=pcfg.cookies, storage_state=pcfg.storage_state)
+        if name == "claude":
+            instance = cls(cookies=pcfg.cookies, storage_state=pcfg.storage_state)
+        else:
+            instance = cls(
+                cookies=pcfg.cookies,
+                storage_state=pcfg.storage_state,
+                playwright_headless=config.playwright_headless,
+            )
         try:
             ok = await instance.login()
             if ok:
@@ -61,9 +78,11 @@ async def _init_providers() -> None:
 
 
 async def _shutdown_providers() -> None:
-    for name, provider in _providers.items():
+    for name, provider in list(_providers.items()):
         try:
-            await provider.close()
+            await asyncio.wait_for(provider.close(), timeout=45.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timeout closing provider %s (browser may still exit on its own)", name)
         except Exception as e:
             logger.warning("Error closing provider %s: %s", name, e)
 
@@ -124,23 +143,24 @@ class HealthResponse(BaseModel):
 
 @app.post("/v1/chat", response_model=ChatResponseSchema)
 async def chat(req: ChatRequest) -> ChatResponseSchema:
-    provider = await _get_active_provider(req.provider)
-    _request_counts[req.provider] += 1
-    try:
-        result: ChatResponse = await provider.send_message(req.message, req.conversation_id)
-        _last_errors[req.provider] = None
-        return ChatResponseSchema(
-            provider=result.provider,
-            message=result.message,
-            conversation_id=result.conversation_id,
-            model=result.model,
-            timestamp=result.timestamp,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        _last_errors[req.provider] = str(e)
-        raise HTTPException(status_code=500, detail=f"Provider error: {e}")
+    async with _chat_lock(req.provider):
+        provider = await _get_active_provider(req.provider)
+        _request_counts[req.provider] += 1
+        try:
+            result: ChatResponse = await provider.send_message(req.message, req.conversation_id)
+            _last_errors[req.provider] = None
+            return ChatResponseSchema(
+                provider=result.provider,
+                message=result.message,
+                conversation_id=result.conversation_id,
+                model=result.model,
+                timestamp=result.timestamp,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            _last_errors[req.provider] = str(e)
+            raise HTTPException(status_code=500, detail=f"Provider error: {e}")
 
 
 @app.get("/v1/providers", response_model=list[ProviderInfo])

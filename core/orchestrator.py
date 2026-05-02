@@ -331,4 +331,13 @@ class ClaudeOrchestrator:
                     last_exc = e
                     self._append_error(run_id, {"phase": "post_reset_send", "error": str(e)})
 
-        raise RuntimeError(str(last_exc) if last_exc else "Claude send failed after retries")
+        parts: list[str] = [f"run_id={run_id}"]
+        if last_exc is not None:
+            parts.insert(0, str(last_exc))
+        if last_parsed is not None and last_parsed.errors:
+            parts.append("parser_errors=" + "; ".join(last_parsed.errors[:12]))
+        if last_parsed is not None and (last_parsed.text or "").strip():
+            parts.append("parsed_preview=" + (last_parsed.text or "").strip()[:100].replace("\n", " "))
+        elif last_dom.strip():
+            parts.append("dom_preview=" + last_dom.strip()[:120].replace("\n", " "))
+        raise RuntimeError("Claude send failed after retries — " + " | ".join(parts))
