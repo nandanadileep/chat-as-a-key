@@ -56,8 +56,6 @@ class AppConfig:
     log_level: str = "info"
     """When True, Claude's BrowserSessionManager uses headless Chrome (better for Docker/CI)."""
     claude_headless: bool = False
-    """When True, Gemini / Grok / Copilot use headless bundled Chromium. Set false for headed (local debug)."""
-    playwright_headless: bool = True
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
 
     @classmethod
@@ -67,7 +65,6 @@ class AppConfig:
             port=int(os.getenv("PORT", "8000")),
             log_level=os.getenv("LOG_LEVEL", "info"),
             claude_headless=os.getenv("CLAUDE_HEADLESS", "false").lower() in ("1", "true", "yes"),
-            playwright_headless=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes"),
         )
 
         provider_names = ["claude", "chatgpt", "gemini", "grok", "perplexity", "copilot"]

@@ -59,11 +59,7 @@ async def _init_providers() -> None:
         if name == "claude":
             instance = cls(cookies=pcfg.cookies, storage_state=pcfg.storage_state)
         else:
-            instance = cls(
-                cookies=pcfg.cookies,
-                storage_state=pcfg.storage_state,
-                playwright_headless=config.playwright_headless,
-            )
+            instance = cls(cookies=pcfg.cookies, storage_state=pcfg.storage_state)
         try:
             ok = await instance.login()
             if ok:
