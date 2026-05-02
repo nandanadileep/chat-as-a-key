@@ -2,6 +2,10 @@
 
 Self-hostable proxy that drives **Claude.ai, ChatGPT, Gemini, Grok, Perplexity, and Microsoft Copilot** in a real browser (Playwright), reuses **your** sessions, and exposes a small **REST** API. It is **not** those vendors’ official APIs.
 
+I wanted one `POST /chat` endpoint that could reach Claude, ChatGPT, Gemini, Grok, Perplexity, and Copilot — reusing my existing subscriptions, no extra API keys. So I built a Playwright proxy that drives the real browser UIs and exposes a clean REST layer on top.
+
+Some providers made it. Some hit a Cloudflare wall. The smoke results are pinned below.
+
 > **Legal / terms:** read **[DISCLAIMER.md](DISCLAIMER.md)** in full. This project is not affiliated with Anthropic, OpenAI, Google, xAI, Perplexity, or Microsoft. Use is at your own risk; accounts can be limited or closed under provider rules.
 
 ---
