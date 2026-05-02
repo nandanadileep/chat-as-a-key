@@ -5,19 +5,19 @@ import time
 from typing import Optional
 from urllib.parse import urlparse
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Page
 
+from browser.generic_network_collector import GenericProviderNetworkCollector
 from core.traced_send import send_with_optional_failure_trace
+from parsers.generic_parser import parse_generic_turn
 
-from .base import ChatResponse
-from .playwright_bases import StealthChromePlaywrightProvider
+from .base import ChatResponse, PlaywrightProviderBase
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://chatgpt.com"
 
-# Visible input is often a contenteditable shell; plain textarea / data-testid nodes may exist hidden.
-_COMPOSER_CANDIDATES = (
+COMPOSER_SELECTORS = (
     'div#prompt-textarea[contenteditable="true"]',
     'div[contenteditable="true"][data-testid="prompt-textarea"]',
     "#prompt-textarea",
@@ -32,75 +32,27 @@ _COMPOSER_CANDIDATES = (
     "main form textarea",
     "footer textarea",
     '[data-testid="prompt-textarea"]',
-    "form textarea",
-    "textarea[data-id]",
-    "textarea[tabindex='0']",
 )
 
-_COMPOSER_WAIT_CAP_MS = 25_000
 
-
-def _ms_budget(end: float, cap: int = _COMPOSER_WAIT_CAP_MS) -> int:
-    ms = int((end - time.monotonic()) * 1000)
-    return max(400, min(cap, ms))
-
-
-async def _try_locator_visible_composer(loc: Locator, *, end: float, last_err_holder: list) -> Optional[Locator]:
-    cap = _COMPOSER_WAIT_CAP_MS
-    bw = _ms_budget(end, cap)
-    if bw < 800:
-        return None
-    try:
-        attach_ms = min(bw, 20_000)
-        await loc.wait_for(state="attached", timeout=attach_ms)
-        try:
-            await loc.scroll_into_view_if_needed(timeout=min(8_000, _ms_budget(end, cap)))
-        except Exception:
-            pass
-        await loc.wait_for(state="visible", timeout=_ms_budget(end, cap))
-        return loc
-    except Exception as e:
-        last_err_holder[0] = e
-        return None
-
-
-async def _wait_visible_composer(page: Page, timeout_ms: int = 120_000) -> Locator:
-    end = time.monotonic() + timeout_ms / 1000.0
-    last_err: Optional[Exception] = None
-    last_holder: list = [None]
-
-    while time.monotonic() < end:
-        if _ms_budget(end) < 800:
-            break
-        role = page.get_by_role("textbox", name=re.compile(r"message|chat", re.I)).first
-        hit = await _try_locator_visible_composer(role, end=end, last_err_holder=last_holder)
-        if hit is not None:
-            return hit
-        if last_holder[0] is not None:
-            last_err = last_holder[0]
-
-        for sel in _COMPOSER_CANDIDATES:
-            if _ms_budget(end) < 800:
-                break
-            loc = page.locator(sel).first
-            hit = await _try_locator_visible_composer(loc, end=end, last_err_holder=last_holder)
-            if hit is not None:
-                return hit
-            if last_holder[0] is not None:
-                last_err = last_holder[0]
-
-        if _ms_budget(end) >= 800:
-            ph = page.get_by_placeholder(
-                re.compile(r"message|ask|type|send|search|chat|prompt", re.I)
-            ).first
-            hit = await _try_locator_visible_composer(ph, end=end, last_err_holder=last_holder)
-            if hit is not None:
-                return hit
-            if last_holder[0] is not None:
-                last_err = last_holder[0]
-
-        await asyncio.sleep(0.35)
-    raise TimeoutError(f"ChatGPT composer not visible: {last_err}")
+def _chatgpt_network_url(url: str) -> bool:
+    u = url.lower()
+    if "chatgpt.com" not in u and "chat.openai.com" not in u and "openai.com" not in u:
+        return False
+    if any(
+        x in u
+        for x in (
+            "conversation.json",
+            "backend-api",
+            "completions",
+            "/backend/",
+            "conversation",
+            "chat_stream",
+            "/api/",
+        )
+    ):
+        return True
+    return False
 
 
 async def _chatgpt_explicitly_logged_out(page: Page) -> bool:
@@ -120,92 +72,22 @@ def _chatgpt_on_app_surface(url: str) -> bool:
     return n == "chatgpt.com" or n.endswith(".chatgpt.com") or n == "chat.openai.com" or n.endswith(".chat.openai.com")
 
 
-class ChatGPTProvider(StealthChromePlaywrightProvider):
+class ChatGPTProvider(PlaywrightProviderBase):
     name = "chatgpt"
     BASE_URL = BASE_URL
+    USE_STEALTH = True
     HEADED_ENV_VAR = "CHATGPT_HEADED"
 
-    async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
-        await self._ensure_browser()
-        page = self._page
-
-        async def _attempt() -> ChatResponse:
-            url = f"{BASE_URL}/c/{conversation_id}" if conversation_id else BASE_URL
-            await page.goto(url, wait_until="domcontentloaded")
-            try:
-                await page.wait_for_load_state("load", timeout=30_000)
-            except Exception:
-                pass
-            try:
-                await page.wait_for_load_state("networkidle", timeout=25_000)
-            except Exception:
-                pass
-            await asyncio.sleep(3.0)
-
-            for pattern in (
-                r"Accept all",
-                r"^Accept$",
-                r"Continue",
-                r"Dismiss",
-                r"Not now",
-                r"Maybe later",
-                r"Skip",
-                r"Got it",
-                r"No thanks",
-                r"Remind me later",
-            ):
-                try:
-                    b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
-                    if await b.is_visible(timeout=600):
-                        await b.click(timeout=2000)
-                        await asyncio.sleep(0.4)
-                except Exception:
-                    pass
-            for _ in range(3):
-                try:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.2)
-                except Exception:
-                    break
-
-            composer = await _wait_visible_composer(page)
-            await composer.click()
-            await composer.fill(message)
-            await asyncio.sleep(0.3)
-
-            await page.keyboard.press("Enter")
-
-            response_text = await self._get_response_on_page(page)
-
-            current_url = page.url
-            conv_id = current_url.split("/c/")[-1].split("?")[0] if "/c/" in current_url else None
-
-            return ChatResponse(
-                provider=self.name,
-                message=response_text,
-                conversation_id=conv_id,
-                model="chatgpt",
-            )
-
-        return await send_with_optional_failure_trace(
-            page=page,
-            page_url_hint="chatgpt.com",
-            send_impl=_attempt,
-        )
-
-    async def _get_response_on_page(self, page: Page) -> str:
+    async def _extract_dom_assistant_text(self, page: Page) -> str:
         try:
             await page.wait_for_selector('[data-testid="stop-button"]', timeout=15000)
         except Exception:
             pass
-
         try:
             await page.wait_for_selector('[data-testid="stop-button"]', state="hidden", timeout=120000)
         except Exception:
             pass
-
         await asyncio.sleep(0.5)
-
         messages = await page.locator('[data-message-author-role="assistant"]').all()
         if messages:
             return (await messages[-1].inner_text()).strip()
@@ -218,20 +100,107 @@ class ChatGPTProvider(StealthChromePlaywrightProvider):
             await asyncio.sleep(2.0)
             if await _chatgpt_explicitly_logged_out(self._page):
                 return False
+            if await self.snapshot_challenge_or_bot_wall(self._page):
+                return False
             try:
-                await _wait_visible_composer(self._page, timeout_ms=15_000)
+                await self._wait_first_visible_composer(self._page, COMPOSER_SELECTORS, timeout_ms=12_000)
                 return True
             except Exception:
                 pass
             if await _chatgpt_explicitly_logged_out(self._page):
                 return False
+            if await self.snapshot_challenge_or_bot_wall(self._page):
+                return False
             if _chatgpt_on_app_surface(self._page.url):
                 logger.info(
-                    "ChatGPT: composer not visible within probe window; treating session as alive "
-                    "(headless/slow UI — send_message will still wait full timeout)"
+                    "ChatGPT: composer not visible in probe; treating session as alive (slow UI / headless)"
                 )
                 return True
             return False
         except Exception as e:
             logger.warning("ChatGPT session check failed: %s", e)
             return False
+
+    async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
+        async with self._request_lock:
+
+            async def _attempt() -> ChatResponse:
+                await self._ensure_browser()
+                page = self._page
+                url = f"{BASE_URL}/c/{conversation_id}" if conversation_id else BASE_URL
+                collector = GenericProviderNetworkCollector(page, _chatgpt_network_url)
+                collector.clear()
+                collector.attach()
+                started = time.perf_counter()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_load_state("load", timeout=30_000)
+                    except Exception:
+                        pass
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=25_000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.0)
+                    for pattern in (
+                        r"Accept all",
+                        r"^Accept$",
+                        r"Continue",
+                        r"Dismiss",
+                        r"Not now",
+                        r"Maybe later",
+                        r"Skip",
+                        r"Got it",
+                        r"No thanks",
+                        r"Remind me later",
+                    ):
+                        try:
+                            b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                            if await b.is_visible(timeout=600):
+                                await b.click(timeout=2000)
+                                await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+                    for _ in range(3):
+                        try:
+                            await page.keyboard.press("Escape")
+                            await asyncio.sleep(0.2)
+                        except Exception:
+                            break
+                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=45_000)
+                    await composer.click()
+                    await composer.fill(message)
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(0.5)
+                finally:
+                    await collector.wait_for_pending(3.0)
+                    collector.detach()
+
+                records = collector.get_records()
+                dom_text = await self._extract_dom_assistant_text(page)
+                parsed = parse_generic_turn(
+                    provider=self.name,
+                    network_records=records,
+                    dom_text=dom_text,
+                    started_perf=started,
+                )
+                if parsed.status != "success" or not (parsed.text or "").strip():
+                    raise RuntimeError(
+                        f"parse_failed source={parsed.source} errors={parsed.errors!r} dom_len={len(dom_text)}"
+                    )
+                current_url = page.url
+                conv_id = current_url.split("/c/")[-1].split("?")[0] if "/c/" in current_url else None
+                return ChatResponse(
+                    provider=self.name,
+                    message=parsed.text.strip(),
+                    conversation_id=conv_id,
+                    model="chatgpt",
+                )
+
+            return await send_with_optional_failure_trace(
+                page=self._page,
+                page_url_hint="chatgpt.com",
+                send_impl=_attempt,
+            )
