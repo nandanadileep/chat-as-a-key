@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,10 +18,12 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://copilot.microsoft.com"
 
 COMPOSER_SELECTORS = (
-    'textarea[placeholder]',
-    '[contenteditable="true"]',
+    "cib-serp-chat cib-text-input textarea",
     "cib-text-input textarea",
+    "textarea.cib-text-area",
+    'textarea[placeholder]',
     "main textarea",
+    '[contenteditable="true"]',
 )
 
 
@@ -112,8 +115,38 @@ class CopilotProvider(PlaywrightProviderBase):
                 started = time.perf_counter()
                 try:
                     await page.goto(BASE_URL, wait_until="domcontentloaded")
-                    await asyncio.sleep(1.5)
-                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=25_000)
+                    try:
+                        await page.wait_for_load_state("load", timeout=30_000)
+                    except Exception:
+                        pass
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=25_000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.0)
+                    for pattern in (
+                        r"Accept all",
+                        r"^Accept$",
+                        r"Continue",
+                        r"Dismiss",
+                        r"Not now",
+                        r"Maybe later",
+                        r"No thanks",
+                    ):
+                        try:
+                            b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                            if await b.is_visible(timeout=600):
+                                await b.click(timeout=2000)
+                                await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+                    try:
+                        await page.evaluate(
+                            "window.scrollTo(0, Math.max(0, document.body.scrollHeight - 200))"
+                        )
+                    except Exception:
+                        pass
+                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=60_000)
                     await composer.click()
                     await composer.fill(message)
                     await asyncio.sleep(0.3)

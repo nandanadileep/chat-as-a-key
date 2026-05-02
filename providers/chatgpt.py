@@ -22,13 +22,13 @@ COMPOSER_SELECTORS = (
     'div[contenteditable="true"][data-testid="prompt-textarea"]',
     "#prompt-textarea",
     "div#prompt-textarea",
+    'textarea#prompt-textarea',
+    '[data-testid="composer-input"]',
+    'div[data-testid="composer"] textarea',
     'div.ProseMirror[contenteditable="true"]',
     'footer div[contenteditable="true"][role="textbox"]',
     'main div[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"][role="textbox"]',
-    "textarea#prompt-textarea",
-    '[data-testid="composer-input"]',
-    'div[data-testid="composer"] textarea',
     "main form textarea",
     "footer textarea",
     '[data-testid="prompt-textarea"]',
@@ -169,7 +169,13 @@ class ChatGPTProvider(PlaywrightProviderBase):
                             await asyncio.sleep(0.2)
                         except Exception:
                             break
-                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=45_000)
+                    try:
+                        await page.evaluate(
+                            "window.scrollTo(0, Math.max(0, document.body.scrollHeight - 200))"
+                        )
+                    except Exception:
+                        pass
+                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=90_000)
                     await composer.click()
                     await composer.fill(message)
                     await asyncio.sleep(0.3)
