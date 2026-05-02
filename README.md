@@ -19,11 +19,11 @@ for **each provider enabled in `.env`**. Below is a **real run** committed to th
 | Provider | Result | Notes |
 | --- | --- | --- |
 | `claude` | **OK** | Response contained `pong`. |
-| `chatgpt` | **FAIL** | Composer never became visible — often a **bot / human gate** (see screenshot) or degraded headless UI, not only selectors. |
+| `chatgpt` | **FAIL** | No visible composer before the wait budget ended. That is **usually not** “we needed a few more seconds”: headless often never reaches the real chat UI (**Cloudflare / verify-human**, **login**, or selector drift). Longer timeouts mostly help when the **same** session **does** reach the composer but loads slowly. Screenshot in subsection below. |
 | `gemini` | **OK** | Response contained `pong`. |
 | `grok` | **OK** | HTTP 200; **empty** assistant text in this run (still counted OK for connectivity). |
-| `perplexity` | **FAIL** | Composer not visible within timeout. |
-| `copilot` | **FAIL** | Composer not visible within timeout. |
+| `perplexity` | **FAIL** | Same class of failure as ChatGPT: timed out waiting for a visible input. Often **no chat box will appear** on that page state (gate, session, or UI variant)—so **raising the timeout alone often only delays FAIL**, unless your network is genuinely slow to the interactive shell. |
+| `copilot` | **FAIL** | Same idea: composer never became visible in time. Commonly **Microsoft sign-in**, **embedded / consent UI**, or automation-sensitive shell—not a missing “extra minute” by default. |
 
 **Recorded:** 2026-05-02 · **Environment:** dev machine, server at `http://127.0.0.1:8000`, 360s timeout per provider.
 
@@ -207,6 +207,7 @@ chat-as-a-key/
   Dockerfile
   requirements.txt
   .env.example
+  .mailmap
   SETUP.md
   DISCLAIMER.md
   docs/
