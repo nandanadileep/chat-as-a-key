@@ -1,4 +1,0 @@
-# Map Cursor Agent co-author identity to the human maintainer so `git shortlog`
-# and GitHub’s contributor list don’t show a separate “Cursor Agent” entry.
-# Update the canonical line if your primary git name/email changes.
-Nandana Dileep <nandanadileep29@gmail.com> Cursor Agent <cursoragent@cursor.com>

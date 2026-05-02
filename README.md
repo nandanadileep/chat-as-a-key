@@ -207,7 +207,6 @@ chat-as-a-key/
   Dockerfile
   requirements.txt
   .env.example
-  .mailmap
   SETUP.md
   DISCLAIMER.md
   docs/
