@@ -18,10 +18,19 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.perplexity.ai"
 
 COMPOSER_SELECTORS = (
+    'textarea[placeholder*="Ask"]',
+    'textarea[placeholder*="ask"]',
+    'textarea[placeholder*="Search"]',
     "main textarea",
     'div[contenteditable="true"][role="textbox"]',
     'textarea[rows]',
     "textarea",
+)
+
+# Shown when placeholder text does not match our attribute selectors (locale / redesign).
+PERPLEXITY_PLACEHOLDER_PATTERNS = (
+    r"Ask anything",
+    r"ask|what|how|search|type|query|message|prompt",
 )
 
 
@@ -83,7 +92,12 @@ class PerplexityProvider(PlaywrightProviderBase):
             if await self.snapshot_challenge_or_bot_wall(self._page):
                 return False
             try:
-                await self._wait_first_visible_composer(self._page, COMPOSER_SELECTORS, timeout_ms=12_000)
+                await self._wait_first_visible_composer(
+                    self._page,
+                    COMPOSER_SELECTORS,
+                    timeout_ms=12_000,
+                    placeholder_patterns=PERPLEXITY_PLACEHOLDER_PATTERNS,
+                )
                 return True
             except Exception:
                 pass
@@ -124,7 +138,18 @@ class PerplexityProvider(PlaywrightProviderBase):
                                 await asyncio.sleep(0.4)
                         except Exception:
                             pass
-                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=60_000)
+                    try:
+                        await page.evaluate(
+                            "window.scrollTo(0, Math.max(0, document.body.scrollHeight - 200))"
+                        )
+                    except Exception:
+                        pass
+                    composer = await self._wait_first_visible_composer(
+                        page,
+                        COMPOSER_SELECTORS,
+                        timeout_ms=90_000,
+                        placeholder_patterns=PERPLEXITY_PLACEHOLDER_PATTERNS,
+                    )
                     await composer.click()
                     await composer.fill(message)
                     await asyncio.sleep(0.3)
