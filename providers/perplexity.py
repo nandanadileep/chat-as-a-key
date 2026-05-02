@@ -5,45 +5,35 @@ import time
 from typing import Optional
 from urllib.parse import urlparse
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Page
 
+from browser.generic_network_collector import GenericProviderNetworkCollector
 from core.traced_send import send_with_optional_failure_trace
+from parsers.generic_parser import parse_generic_turn
 
-from .base import ChatResponse
-from .playwright_bases import StealthChromePlaywrightProvider
+from .base import ChatResponse, PlaywrightProviderBase
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.perplexity.ai"
 
+COMPOSER_SELECTORS = (
+    "main textarea",
+    'div[contenteditable="true"][role="textbox"]',
+    'textarea[rows]',
+    "textarea",
+)
 
-def _ppl_ms_budget(end: float, cap: int = 6000) -> int:
-    ms = int((end - time.monotonic()) * 1000)
-    return max(400, min(cap, ms))
 
-
-async def _resolve_perplexity_composer(page: Page, timeout_ms: int = 120_000) -> Locator:
-    end = time.monotonic() + timeout_ms / 1000.0
-    last_err: Optional[Exception] = None
-    while time.monotonic() < end:
-        candidates: list[Locator] = [
-            page.get_by_placeholder(re.compile(r"ask|what|how|search|type|query|message|prompt", re.I)),
-            page.locator("main textarea"),
-            page.locator('div[contenteditable="true"][role="textbox"]'),
-            page.locator('textarea[rows]'),
-            page.locator("textarea"),
-        ]
-        for loc in candidates:
-            if _ppl_ms_budget(end, 6000) < 800:
-                break
-            c = loc.first
-            try:
-                await c.wait_for(state="visible", timeout=_ppl_ms_budget(end, 6000))
-                return c
-            except Exception as e:
-                last_err = e
-        await asyncio.sleep(0.35)
-    raise TimeoutError(f"Perplexity composer not visible: {last_err}")
+def _perplexity_network_url(url: str) -> bool:
+    u = url.lower()
+    if "/rest/v2" in u or "/socket.io" in u:
+        return True
+    if "perplexity.ai" in u and "/api" in u:
+        return True
+    if "pplx.ai" in u and any(x in u for x in ("api", "rest", "socket")):
+        return True
+    return False
 
 
 async def _perplexity_explicitly_logged_out(page: Page) -> bool:
@@ -62,59 +52,13 @@ def _perplexity_on_app_surface(url: str) -> bool:
     return "perplexity.ai" in n or n.endswith(".perplexity.ai") or "pplx.ai" in n
 
 
-class PerplexityProvider(StealthChromePlaywrightProvider):
+class PerplexityProvider(PlaywrightProviderBase):
     name = "perplexity"
     BASE_URL = BASE_URL
+    USE_STEALTH = True
     HEADED_ENV_VAR = "PERPLEXITY_HEADED"
 
-    async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
-        await self._ensure_browser()
-        page = self._page
-
-        async def _attempt() -> ChatResponse:
-            url = f"{BASE_URL}/search/{conversation_id}" if conversation_id else BASE_URL
-            await page.goto(url, wait_until="domcontentloaded")
-            try:
-                await page.wait_for_load_state("load", timeout=30_000)
-            except Exception:
-                pass
-            await asyncio.sleep(3.0)
-
-            for pattern in (r"Accept all", r"^Accept$", r"Continue", r"Dismiss", r"Not now"):
-                try:
-                    b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
-                    if await b.is_visible(timeout=600):
-                        await b.click(timeout=2000)
-                        await asyncio.sleep(0.4)
-                except Exception:
-                    pass
-
-            composer = await _resolve_perplexity_composer(page)
-            await composer.click()
-            await composer.fill(message)
-            await asyncio.sleep(0.3)
-
-            await page.keyboard.press("Enter")
-
-            response_text = await self._get_response_on_page(page)
-
-            current_url = page.url
-            conv_id = current_url.split("/search/")[-1].split("?")[0] if "/search/" in current_url else None
-
-            return ChatResponse(
-                provider=self.name,
-                message=response_text,
-                conversation_id=conv_id,
-                model="perplexity",
-            )
-
-        return await send_with_optional_failure_trace(
-            page=page,
-            page_url_hint="perplexity.ai",
-            send_impl=_attempt,
-        )
-
-    async def _get_response_on_page(self, page: Page) -> str:
+    async def _extract_dom_assistant_text(self, page: Page) -> str:
         try:
             await page.wait_for_selector('[aria-label*="Stop"]', timeout=15000)
         except Exception:
@@ -123,9 +67,7 @@ class PerplexityProvider(StealthChromePlaywrightProvider):
             await page.wait_for_selector('[aria-label*="Stop"]', state="hidden", timeout=120000)
         except Exception:
             pass
-
         await asyncio.sleep(0.5)
-
         messages = await page.locator('.prose, [class*="answer"]').all()
         if messages:
             return (await messages[-1].inner_text()).strip()
@@ -138,20 +80,81 @@ class PerplexityProvider(StealthChromePlaywrightProvider):
             await asyncio.sleep(2.0)
             if await _perplexity_explicitly_logged_out(self._page):
                 return False
+            if await self.snapshot_challenge_or_bot_wall(self._page):
+                return False
             try:
-                await _resolve_perplexity_composer(self._page, timeout_ms=15_000)
+                await self._wait_first_visible_composer(self._page, COMPOSER_SELECTORS, timeout_ms=12_000)
                 return True
             except Exception:
                 pass
             if await _perplexity_explicitly_logged_out(self._page):
                 return False
             if _perplexity_on_app_surface(self._page.url):
-                logger.info(
-                    "Perplexity: composer not visible within probe window; treating session as alive "
-                    "(send_message will still wait full timeout)"
-                )
+                logger.info("Perplexity: composer probe inconclusive; treating as alive")
                 return True
             return False
         except Exception as e:
             logger.warning("Perplexity session check failed: %s", e)
             return False
+
+    async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
+        async with self._request_lock:
+
+            async def _attempt() -> ChatResponse:
+                await self._ensure_browser()
+                page = self._page
+                collector = GenericProviderNetworkCollector(page, _perplexity_network_url)
+                collector.clear()
+                collector.attach()
+                started = time.perf_counter()
+                try:
+                    url = f"{BASE_URL}/search/{conversation_id}" if conversation_id else BASE_URL
+                    await page.goto(url, wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_load_state("load", timeout=30_000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.0)
+                    for pattern in (r"Accept all", r"^Accept$", r"Continue", r"Dismiss", r"Not now"):
+                        try:
+                            b = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                            if await b.is_visible(timeout=600):
+                                await b.click(timeout=2000)
+                                await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+                    composer = await self._wait_first_visible_composer(page, COMPOSER_SELECTORS, timeout_ms=60_000)
+                    await composer.click()
+                    await composer.fill(message)
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(0.5)
+                finally:
+                    await collector.wait_for_pending(3.0)
+                    collector.detach()
+                records = collector.get_records()
+                dom_text = await self._extract_dom_assistant_text(page)
+                parsed = parse_generic_turn(
+                    provider=self.name,
+                    network_records=records,
+                    dom_text=dom_text,
+                    started_perf=started,
+                )
+                if parsed.status != "success" or not (parsed.text or "").strip():
+                    raise RuntimeError(
+                        f"parse_failed source={parsed.source} errors={parsed.errors!r} dom_len={len(dom_text)}"
+                    )
+                current_url = page.url
+                conv_id = current_url.split("/search/")[-1].split("?")[0] if "/search/" in current_url else None
+                return ChatResponse(
+                    provider=self.name,
+                    message=parsed.text.strip(),
+                    conversation_id=conv_id,
+                    model="perplexity",
+                )
+
+            return await send_with_optional_failure_trace(
+                page=self._page,
+                page_url_hint="perplexity.ai",
+                send_impl=_attempt,
+            )
