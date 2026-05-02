@@ -1,4 +1,4 @@
-from .base import BaseProvider, ChatResponse, ProviderStatus
+from .base import BaseProvider, ChatResponse, PlaywrightProviderBase, ProviderStatus
 from .claude import ClaudeProvider
 from .chatgpt import ChatGPTProvider
 from .gemini import GeminiProvider
@@ -17,6 +17,7 @@ PROVIDER_MAP = {
 
 __all__ = [
     "BaseProvider",
+    "PlaywrightProviderBase",
     "ChatResponse",
     "ProviderStatus",
     "ClaudeProvider",
