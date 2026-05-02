@@ -159,7 +159,7 @@ print(response.json()["message"])
 | `PORT` | `8000` | Listen port |
 | `LOG_LEVEL` | `info` | Uvicorn log level |
 | `ENABLE_TRACING` | `false` | When `true`, adds Chrome `--remote-debugging-port` for **all** Playwright providers; on **empty reply or exception**, one traced retry (CDP + screenshots) under `.o11y/{run_id}/`. Successful requests unchanged. |
-| `PLAYWRIGHT_HEADLESS` | `true` | Gemini, Grok, Copilot: bundled Chromium headless (set `false` for headed local debugging). |
+| `HEADLESS` | `true` | Playwright providers (non-Claude): headless Chrome/Chromium by default; set `false` for headed local debugging. |
 | `CLAUDE_HEADLESS` | `false` | When `true`, Claude uses headless Chrome (containers); default `false` is visible Chrome. |
 | `{PROVIDER}_ENABLED` | `false` | Enable a provider |
 | `{PROVIDER}_COOKIES` | — | JSON cookie array |
@@ -188,7 +188,6 @@ chat-as-a-key/
     claude_parser.py
   providers/
     base.py
-    playwright_bases.py
     claude.py
     chatgpt.py
     gemini.py
