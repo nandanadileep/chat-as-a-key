@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -169,18 +170,51 @@ class PlaywrightProviderBase(BaseProvider, ABC):
         self._playwright = None
 
     @staticmethod
-    async def _wait_first_visible_composer(page: Page, selectors: Sequence[str], timeout_ms: int = 8_000) -> Locator:
-        """Try selectors in order (same pattern as ClaudeOrchestrator._find_composer)."""
+    async def _wait_first_visible_composer(
+        page: Page,
+        selectors: Sequence[str],
+        timeout_ms: int = 8_000,
+        *,
+        placeholder_patterns: Sequence[str] = (),
+    ) -> Locator:
+        """Try selectors in order; ``timeout_ms`` is a total wall-clock budget (not per selector).
+
+        Optionally tries ``get_by_placeholder(re.compile(...))`` for each pattern with any time left.
+        """
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
         last_err: Optional[Exception] = None
+
+        def remaining_ms() -> int:
+            return max(0, int((deadline - time.monotonic()) * 1000))
+
         for sel in selectors:
+            rm = remaining_ms()
+            if rm < 250:
+                break
             loc = page.locator(sel).first
             try:
-                await loc.wait_for(state="visible", timeout=timeout_ms)
+                await loc.wait_for(state="visible", timeout=rm)
                 return loc
             except Exception as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"Composer not found. Tried: {selectors!r} last={last_err!r}")
+
+        for pat in placeholder_patterns:
+            rm = remaining_ms()
+            if rm < 250:
+                break
+            loc = page.get_by_placeholder(re.compile(pat, re.I)).first
+            try:
+                await loc.wait_for(state="visible", timeout=rm)
+                return loc
+            except Exception as e:
+                last_err = e
+                continue
+
+        raise RuntimeError(
+            f"Composer not found within {timeout_ms}ms. "
+            f"Tried selectors={selectors!r} placeholders={list(placeholder_patterns)!r} last={last_err!r}"
+        )
 
     @staticmethod
     async def snapshot_challenge_or_bot_wall(page: Page) -> bool:
