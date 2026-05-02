@@ -123,10 +123,11 @@ class ChatGPTProvider(PlaywrightProviderBase):
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         async with self._request_lock:
+            await self._ensure_browser()
+            trace_page = self._page
 
             async def _attempt() -> ChatResponse:
-                await self._ensure_browser()
-                page = self._page
+                page = trace_page
                 url = f"{BASE_URL}/c/{conversation_id}" if conversation_id else BASE_URL
                 collector = GenericProviderNetworkCollector(page, _chatgpt_network_url)
                 collector.clear()
@@ -200,7 +201,7 @@ class ChatGPTProvider(PlaywrightProviderBase):
                 )
 
             return await send_with_optional_failure_trace(
-                page=self._page,
+                page=trace_page,
                 page_url_hint="chatgpt.com",
                 send_impl=_attempt,
             )

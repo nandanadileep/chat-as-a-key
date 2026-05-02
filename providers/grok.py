@@ -36,7 +36,13 @@ def _grok_network_url(url: str) -> bool:
 
 
 def _grok_explicitly_logged_out(page: Page) -> bool:
-    u = page.url.lower()
+    try:
+        raw = (page.url or "").strip()
+    except Exception:
+        return False
+    if not raw or raw.lower() == "about:blank":
+        return False
+    u = raw.lower()
     netloc = urlparse(u).netloc.lower()
     path = urlparse(u).path.lower()
     if netloc != "grok.com" and not netloc.endswith(".grok.com"):
@@ -97,10 +103,11 @@ class GrokProvider(PlaywrightProviderBase):
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         async with self._request_lock:
+            await self._ensure_browser()
+            trace_page = self._page
 
             async def _attempt() -> ChatResponse:
-                await self._ensure_browser()
-                page = self._page
+                page = trace_page
                 collector = GenericProviderNetworkCollector(page, _grok_network_url)
                 collector.clear()
                 collector.attach()
@@ -140,7 +147,7 @@ class GrokProvider(PlaywrightProviderBase):
                 )
 
             return await send_with_optional_failure_trace(
-                page=self._page,
+                page=trace_page,
                 page_url_hint="grok.com",
                 send_impl=_attempt,
             )

@@ -101,10 +101,11 @@ class CopilotProvider(PlaywrightProviderBase):
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         async with self._request_lock:
+            await self._ensure_browser()
+            trace_page = self._page
 
             async def _attempt() -> ChatResponse:
-                await self._ensure_browser()
-                page = self._page
+                page = trace_page
                 collector = GenericProviderNetworkCollector(page, _copilot_network_url)
                 collector.clear()
                 collector.attach()
@@ -141,7 +142,7 @@ class CopilotProvider(PlaywrightProviderBase):
                 )
 
             return await send_with_optional_failure_trace(
-                page=self._page,
+                page=trace_page,
                 page_url_hint="copilot.microsoft.com",
                 send_impl=_attempt,
             )

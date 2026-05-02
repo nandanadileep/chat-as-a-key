@@ -99,10 +99,11 @@ class PerplexityProvider(PlaywrightProviderBase):
 
     async def send_message(self, message: str, conversation_id: Optional[str] = None) -> ChatResponse:
         async with self._request_lock:
+            await self._ensure_browser()
+            trace_page = self._page
 
             async def _attempt() -> ChatResponse:
-                await self._ensure_browser()
-                page = self._page
+                page = trace_page
                 collector = GenericProviderNetworkCollector(page, _perplexity_network_url)
                 collector.clear()
                 collector.attach()
@@ -154,7 +155,7 @@ class PerplexityProvider(PlaywrightProviderBase):
                 )
 
             return await send_with_optional_failure_trace(
-                page=self._page,
+                page=trace_page,
                 page_url_hint="perplexity.ai",
                 send_impl=_attempt,
             )
